@@ -22,7 +22,7 @@ DOCKER_ROOT="/media"
 # Optionally only process .mp4 files whose names match this regex (case-insensitive)
 MATCH_REGEX="x265"
 
-# Show files that were skipped due to regex matching
+# Show files that were skipped due to regex matching or (if enabled with ONLY_PROCESS_FILES_WITH_MISSING_CTTS_ATOM) already containing a CTTS ATOM
 # Options: YES / NO
 SHOW_SKIPPED="NO"
 
@@ -34,6 +34,9 @@ PROCESS_SUBTITLES="YES"
 # Delete original .mp4 file and any .srt files (if PROCESS_SUBTITLES is "YES") upon success of each conversion
 # Options: YES / NO / ASK
 DELETE_SOURCE="NO"
+
+# Only process MP4 files that are missing the CTTS ATOM (requires AtomicParsley on host) https://github.com/wez/atomicparsley
+ONLY_PROCESS_FILES_WITH_MISSING_CTTS_ATOM="NO"
 
 ###############################################
 # RADARR SETTINGS
@@ -56,7 +59,7 @@ RADARR_TAG_NAME="mp4-to-mkv"
 RADARR_UNMONITOR="YES"
 
 ###############################################
-# DOCKER + MKVMERGE VALIDATION
+# MKVMERGE VALIDATION
 ###############################################
 
 # 1. Check if Docker is installed
@@ -87,6 +90,15 @@ fi
 if ! docker exec "$CONTAINER" which mkvmerge >/dev/null 2>&1; then
     echo "ERROR: mkvmerge is not available inside container '${CONTAINER}'."
     exit 1
+fi
+
+# Verify AtomicParsley exists if CTTS filtering is enabled
+if [ "$ONLY_PROCESS_FILES_WITH_MISSING_CTTS_ATOM" = "YES" ]; then
+    if ! command -v AtomicParsley >/dev/null 2>&1; then
+        echo "ERROR: ONLY_PROCESS_FILES_WITH_MISSING_CTTS_ATOM=YES but AtomicParsley is not installed."
+        echo "Please install AtomicParsley or set ONLY_PROCESS_FILES_WITH_MISSING_CTTS_ATOM=NO"
+        exit 1
+    fi
 fi
 
 ###############################################
@@ -136,7 +148,7 @@ print_summary() {
     log "========== SUMMARY =========="
     log "Successful conversions: $success_count"
     log "Failed conversions:     $fail_count"
-    log "Skipped (regex no-match): $skip_count"
+    log "Skipped: $skip_count"
 
     if (( fail_count > 0 )); then
         log ""
@@ -263,6 +275,21 @@ update_radarr_for_movie() {
     log "Radarr: Refresh triggered"
 }
 
+check_ctts_atom() {
+    local file="$1"
+
+    # Extract only atom lines, ignore everything else
+    local atom_output
+    atom_output=$(AtomicParsley "$file" -T 1 2>/dev/null | grep -E "Atom [a-zA-Z0-9]{4}")
+
+    # Now check specifically for the CTTS atom
+    if echo "$atom_output" | grep -q "Atom ctts"; then
+        return 0   # CTTS exists
+    else
+        return 1   # CTTS missing
+    fi
+}
+
 ###############################################
 # MAIN LOOP
 ###############################################
@@ -285,12 +312,26 @@ while IFS= read -r inputFile <&3; do
 
     # Skip files that do not match the regex
     if [[ ! "$(basename "$inputFile")" =~ $MATCH_REGEX ]]; then
-        if [[ "$SHOW_SKIPPED" == "YES" ]];
-            then log "Skipping (no regex match): $inputFile"
+        if [[ "$SHOW_SKIPPED" == "YES" ]]; then
+            log "Skipping (no regex match): $inputFile"
             skipped_files+=("$inputFile")
         fi
         ((skip_count++))
         continue
+    fi
+
+    # Only process files with missing CTTS ATOM if enabled
+    if [ "$ONLY_PROCESS_FILES_WITH_MISSING_CTTS_ATOM" = "YES" ]; then
+        if check_ctts_atom "$inputFile"; then
+            if [[ "$SHOW_SKIPPED" == "YES" ]]; then
+                log "Skipping (CTTS ATOM present): $inputFile"
+                skipped_files+=("$inputFile")
+            fi
+            ((skip_count++))
+            continue
+        else
+            echo "Processing (CTTS ATOM missing): $inputFile"
+        fi
     fi
 
     dir=$(dirname "$inputFile")
