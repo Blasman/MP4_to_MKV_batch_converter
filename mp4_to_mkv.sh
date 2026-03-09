@@ -38,6 +38,9 @@ DELETE_SOURCE="NO"
 # Only process MP4 files that are missing the CTTS ATOM (requires AtomicParsley on host) https://github.com/wez/atomicparsley
 ONLY_PROCESS_FILES_WITH_MISSING_CTTS_ATOM="NO"
 
+# If ONLY_PROCESS_FILES_WITH_MISSING_CTTS_ATOM="YES" - keep a .txt file list of files that do have the CTTS ATOM (to prevent re-scanning on every script run)
+LIST_OF_FILES_WITH_CTOS_ATOM="/mnt/user/logs/mp4_files_with_ctts_atom.txt"
+
 ###############################################
 # RADARR SETTINGS
 ###############################################
@@ -59,7 +62,7 @@ RADARR_TAG_NAME="mp4-to-mkv"
 RADARR_UNMONITOR="YES"
 
 ###############################################
-# MKVMERGE VALIDATION
+# VALIDATION CHECKS
 ###############################################
 
 # 1. Check if Docker is installed
@@ -92,12 +95,29 @@ if ! docker exec "$CONTAINER" which mkvmerge >/dev/null 2>&1; then
     exit 1
 fi
 
-# Verify AtomicParsley exists if CTTS filtering is enabled
-if [ "$ONLY_PROCESS_FILES_WITH_MISSING_CTTS_ATOM" = "YES" ]; then
+# CTTS ATOM checks
+if [[ "$ONLY_PROCESS_FILES_WITH_MISSING_CTTS_ATOM" == "YES" ]]; then
     if ! command -v AtomicParsley >/dev/null 2>&1; then
         echo "ERROR: ONLY_PROCESS_FILES_WITH_MISSING_CTTS_ATOM=YES but AtomicParsley is not installed."
         echo "Please install AtomicParsley or set ONLY_PROCESS_FILES_WITH_MISSING_CTTS_ATOM=NO"
         exit 1
+    fi
+    # Resolve list file path: if user provided a directory (or trailing slash),
+    # use a default filename inside that directory; otherwise treat value as file.
+    if [[ -n "$LIST_OF_FILES_WITH_CTOS_ATOM" ]]; then
+        if [[ -d "$LIST_OF_FILES_WITH_CTOS_ATOM" || "${LIST_OF_FILES_WITH_CTOS_ATOM: -1}" == "/" ]]; then
+            LIST_OF_FILES_WITH_CTOS_ATOM_FILE="${LIST_OF_FILES_WITH_CTOS_ATOM%/}/mp4_files_with_ctts_atom.txt"
+        else
+            LIST_OF_FILES_WITH_CTOS_ATOM_FILE="$LIST_OF_FILES_WITH_CTOS_ATOM"
+        fi
+    else
+        LIST_OF_FILES_WITH_CTOS_ATOM_FILE=""
+    fi
+
+    # Ensure the list file and parent dir exist
+    if [[ -n "$LIST_OF_FILES_WITH_CTOS_ATOM_FILE" ]]; then
+        mkdir -p "$(dirname "$LIST_OF_FILES_WITH_CTOS_ATOM_FILE")" 2>/dev/null || true
+        touch "$LIST_OF_FILES_WITH_CTOS_ATOM_FILE" 2>/dev/null || true
     fi
 fi
 
@@ -278,12 +298,25 @@ update_radarr_for_movie() {
 check_ctts_atom() {
     local file="$1"
 
+    # If a list-file is configured and contains this file, treat it as having CTTS
+    if [[ -n "$LIST_OF_FILES_WITH_CTOS_ATOM_FILE" && -f "$LIST_OF_FILES_WITH_CTOS_ATOM_FILE" ]]; then
+        if grep -Fxq "$file" "$LIST_OF_FILES_WITH_CTOS_ATOM_FILE"; then
+            return 0
+        fi
+    fi
+
     # Extract only atom lines, ignore everything else
     local atom_output
     atom_output=$(AtomicParsley "$file" -T 1 2>/dev/null | grep -E "Atom [a-zA-Z0-9]{4}")
 
     # Now check specifically for the CTTS atom
     if echo "$atom_output" | grep -q "Atom ctts"; then
+        # append to list if configured and not already present
+        if [[ -n "$LIST_OF_FILES_WITH_CTOS_ATOM_FILE" ]]; then
+            if ! grep -Fxq "$file" "$LIST_OF_FILES_WITH_CTOS_ATOM_FILE"; then
+                printf '%s\n' "$file" >> "$LIST_OF_FILES_WITH_CTOS_ATOM_FILE"
+            fi
+        fi
         return 0   # CTTS exists
     else
         return 1   # CTTS missing
