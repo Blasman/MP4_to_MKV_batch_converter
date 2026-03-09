@@ -363,7 +363,7 @@ while IFS= read -r inputFile <&3; do
             ((skip_count++))
             continue
         else
-            echo "Processing (CTTS ATOM missing): $inputFile"
+            log "Processing (CTTS ATOM missing): $inputFile"
         fi
     fi
 
